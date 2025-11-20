@@ -1,7 +1,5 @@
 import hashlib
-
 import numpy as np
-
 import pandas as pd
 
 # TODO: Write a function which creates a sample split based in some id_column and training_frac.
