@@ -23,10 +23,15 @@ weight = df["Exposure"].values
 df["PurePremium"] = df["ClaimAmountCut"] / df["Exposure"]
 y = df["PurePremium"]
 # TODO: Why do you think, we divide by exposure here to arrive at our outcome variable?
-
+# To account for entries that have little data, as they were only recently inputted.
+# These will have low exposure and more unreliable compared to entries that we have observed over a long time.
+# Eg someone getting insured and suddenly having an accident tells us very little
+# as it is hard to know if this is a predictor of future behaviour or just bad luck.
+# Eg whereas we have more data for someone who has been insured for longer, so can get better predictions of their behaviour.
+# We want the model to weight observations with higher exposure more, as they are more reliable.
 
 # TODO: use your create_sample_split function here
-# df = create_sample_split(...)
+df = create_sample_split(df, "IDpol")
 train = np.where(df["sample"] == "train")
 test = np.where(df["sample"] == "test")
 df_train = df.iloc[train].copy()
@@ -86,15 +91,35 @@ print(
 
 # Let's put together a pipeline
 numeric_cols = ["BonusMalus", "Density"]
+numeric_spline_pipeline = Pipeline(
+    steps=[
+        ("scale", StandardScaler()),
+        (
+            "splines",
+            SplineTransformer(
+                degree=3,
+                n_knots=5,
+                knots="quantile",
+                include_bias=False,  # only one intercept overall (from GLM)
+            ),
+        ),
+    ]
+)
+
 preprocessor = ColumnTransformer(
     transformers=[
         # TODO: Add numeric transforms here
+        ("num_splines", numeric_spline_pipeline, numeric_cols),
         ("cat", OneHotEncoder(sparse_output=False, drop="first"), categoricals),
     ]
 )
 preprocessor.set_output(transform="pandas")
 model_pipeline = Pipeline(
     # TODO: Define pipeline steps here
+    steps=[
+    ("preprocessor", preprocessor),
+    ("estimate", GeneralizedLinearRegressor(family=TweedieDist, l1_ratio=1, fit_intercept=True)),
+    ]
 )
 
 # let's have a look at the pipeline
@@ -144,6 +169,22 @@ print(
 # 1: Define the modelling pipeline. Tip: This can simply be a LGBMRegressor based on X_train_t from before.
 # 2. Make sure we are choosing the correct objective for our estimator.
 
+lgbm_estimator = LGBMRegressor(
+    objective='tweedie',
+    tweedie_variance_power=1.5,
+    random_state=42,
+    metric='None',
+    n_estimators=1000,
+    learning_rate=0.05
+)
+
+model_pipeline = Pipeline(
+    # TODO: Define pipeline steps here
+    steps=[
+        ("estimate", lgbm_estimator)
+    ]
+)
+
 model_pipeline.fit(X_train_t, y_train_t, estimate__sample_weight=w_train_t)
 df_test["pp_t_lgbm"] = model_pipeline.predict(X_test_t)
 df_train["pp_t_lgbm"] = model_pipeline.predict(X_train_t)
@@ -171,7 +212,13 @@ print(
 # but to save compute time here, we focus on getting the learning rate
 # and the number of estimators somewhat aligned -> tune learning_rate and n_estimators
 cv = GridSearchCV(
-
+    estimator=model_pipeline,
+    param_grid={'estimate__n_estimators': [100, 500], 'estimate__learning_rate': [0.01, 0.05, 0.1]},
+    scoring = 'neg_mean_squared_error',
+    cv=3,
+    verbose=0,
+    n_jobs=-1,
+    force_col_wise=True,
 )
 cv.fit(X_train_t, y_train_t, estimate__sample_weight=w_train_t)
 
@@ -250,3 +297,70 @@ ax.legend(loc="upper left")
 plt.plot()
 
 # %%
+# Problem Set 4
+# Exercise 1 -- Monotonicity Constraints
+# See Ex1_pt1.ipynb for part 1
+
+# Part 2 -- New constrained model pipeline
+# Find BonusMalus index in feature set X_train_t
+feature_names = X_train_t.columns.tolist()
+bonusmalus_idx = feature_names.index("BonusMalus")
+
+# List of 0s, with BonusMalus set = 1
+monotone_constraints = [0] * len(feature_names)
+monotone_constraints[bonusmalus_idx] = 1
+
+# constrained_lgbm
+constrained_lgbm_estimator = LGBMRegressor(
+    objective='tweedie',
+    tweedie_variance_power=1.5,
+    random_state=42,
+    metric='None',
+    n_estimators=1000,
+    learning_rate=0.05,
+    monotone_constraints=monotone_constraints,
+    force_col_wise=True,
+)
+
+constrained_lgbm_pipeline = Pipeline(
+    steps=[
+        ("estimate", constrained_lgbm_estimator),
+    ]
+)
+
+# Part 3 -- Cross-validation
+constrained_cv = GridSearchCV(
+    estimator=constrained_lgbm_pipeline,
+    param_grid={'estimate__n_estimators': [100, 500], 'estimate__learning_rate': [0.01, 0.05, 0.1]},
+    scoring = 'neg_mean_squared_error',
+    cv=3,
+    verbose=0,
+    n_jobs=-1
+)
+constrained_cv.fit(X_train_t, y_train_t, estimate__sample_weight=w_train_t)
+
+# save predictions
+df_test["pp_t_lgbm_constrained"] = constrained_cv.best_estimator_.predict(X_test_t)
+df_train["pp_t_lgbm_constrained"] = constrained_cv.best_estimator_.predict(X_train_t)
+
+print(
+    "training loss t_lgbm_constrained:  {}".format(
+        TweedieDist.deviance(y_train_t, df_train["pp_t_lgbm_constrained"], sample_weight=w_train_t)
+        / np.sum(w_train_t)
+    )
+)
+
+print(
+    "testing loss t_lgbm_constrained:  {}".format(
+        TweedieDist.deviance(y_test_t, df_test["pp_t_lgbm_constrained"], sample_weight=w_test_t)
+        / np.sum(w_test_t)
+    )
+)
+
+print(
+    "Total claim amount on test set, observed = {}, predicted = {}".format(
+        df["ClaimAmountCut"].values[test].sum(),
+        np.sum(df["Exposure"].values[test] * df_test["pp_t_lgbm_constrained"]),
+    )
+)
+
