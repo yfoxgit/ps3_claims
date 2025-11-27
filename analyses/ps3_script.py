@@ -4,12 +4,19 @@ import numpy as np
 import pandas as pd
 from dask_ml.preprocessing import Categorizer
 from glum import GeneralizedLinearRegressor, TweedieDistribution
-from lightgbm import LGBMRegressor
+import lightgbm as lgb
 from sklearn.compose import ColumnTransformer
 from sklearn.metrics import auc
 from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, SplineTransformer, StandardScaler
+
+import sys
+import os
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
 
 from ps3.data import create_sample_split, load_transform
 
@@ -169,7 +176,7 @@ print(
 # 1: Define the modelling pipeline. Tip: This can simply be a LGBMRegressor based on X_train_t from before.
 # 2. Make sure we are choosing the correct objective for our estimator.
 
-lgbm_estimator = LGBMRegressor(
+lgbm_estimator = lgb.LGBMRegressor(
     objective='tweedie',
     tweedie_variance_power=1.5,
     random_state=42,
@@ -311,7 +318,7 @@ monotone_constraints = [0] * len(feature_names)
 monotone_constraints[bonusmalus_idx] = 1
 
 # constrained_lgbm
-constrained_lgbm_estimator = LGBMRegressor(
+constrained_lgbm_estimator = lgb.LGBMRegressor(
     objective='tweedie',
     tweedie_variance_power=1.5,
     random_state=42,
@@ -364,3 +371,26 @@ print(
     )
 )
 
+# PS4 - Ex 2 
+# Steps:
+# 1. Re-fit the best constrained lgbm estimator from the cross-validation
+# 2. Provide the tuples of the test and train dataset to the estimator via eval_set
+# 3. Plot the learning curve
+
+best_lgbm_model = constrained_cv.best_estimator_.named_steps["estimate"]
+
+best_lgbm_model.fit(
+    X_train_t, 
+    y_train_t, 
+    sample_weight=w_train_t,
+    eval_set=[(X_train_t, y_train_t), (X_test_t, y_test_t)],
+    eval_names=['Train', 'Test'],
+    eval_sample_weight=[w_train_t, w_test_t],
+    eval_metric='tweedie', # Explicitly track Tweedie deviance
+    verbose=False
+)
+
+ax = lgb.plot_metric(best_lgbm_model, metric='tweedie', figsize=(10, 6))
+ax.set_title("Learning Curve: Convergence of Tweedie Deviance")
+ax.set_ylabel("Tweedie Deviance")
+plt.show()
